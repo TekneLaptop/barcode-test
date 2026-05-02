@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Barcode Scanner Test</title>
+    <!-- Laad de bibliotheek via CDN -->
+    <script src="https://unpkg.com/html5-qrcode"></script>
+    <style>
+        body { font-family: sans-serif; text-align: center; padding: 20px; background-color: #f4f4f4; }
+        #reader { width: 100%; max-width: 500px; margin: auto; background: white; border-radius: 8px; padding: 10px; }
+        #result { margin-top: 20px; font-weight: bold; color: #333; font-size: 1.2em; padding: 10px; background: #e0f7fa; border-radius: 5px; display: inline-block; }
+    </style>
+</head>
+<body>
+
+    <h1>Barcode Scanner</h1>
+    <div id="reader"></div>
+    <div id="result">Scan een barcode...</div>
+
+    <script>
+        function onScanSuccess(decodedText, decodedResult) {
+            // Toon het resultaat op het scherm
+            document.getElementById('result').innerText = "Code: " + decodedText;
+            console.log("Gescand:", decodedText);
+            
+            // Optioneel: stop even met scannen na een succesvolle scan
+            // html5QrcodeScanner.clear(); 
+        }
+
+        let html5QrcodeScanner = new Html5QrcodeScanner(
+            "reader", 
+            { 
+                fps: 10, 
+                qrbox: {width: 300, height: 150}, // Ideaal voor lange barcodes
+                aspectRatio: 1.0 // Houdt de camera feed vierkant/standaard
+            }, 
+            /* verbose= */ false
+        );
+        
+        html5QrcodeScanner.render(onScanSuccess);
+    </script>
+</body>
+</html>
