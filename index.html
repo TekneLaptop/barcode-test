@@ -1,50 +1,285 @@
 <!DOCTYPE html>
 <html lang="nl">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Auto Barcode Scanner</title>
-    <script src="https://unpkg.com/html5-qrcode"></script>
-    <style>
-        body { font-family: sans-serif; text-align: center; padding: 20px; background-color: #f4f4f4; margin: 0; }
-        /* Belangrijk: Geef de container een vaste of minimale hoogte om 'sprongen' te voorkomen */
-        #reader { width: 100%; max-width: 500px; margin: auto; background: black; border-radius: 8px; overflow: hidden; min-height: 250px; }
-        #result { margin-top: 20px; font-weight: bold; color: #333; font-size: 1.2em; padding: 15px; background: #e0f7fa; border-radius: 5px; display: inline-block; min-width: 200px; }
-    </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Snelle Logistieke Scanner v2</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 16px; text-align: center;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: #0f172a; color: #f8fafc;
+  }
+  h2 { margin: 0 0 12px; font-size: 1.1rem; }
+  #viewport {
+    position: relative; width: 100%; max-width: 520px; margin: 0 auto;
+    aspect-ratio: 4 / 3; background: #000; border-radius: 12px; overflow: hidden;
+    border: 2px solid #334155;
+  }
+  video { width: 100%; height: 100%; object-fit: cover; display: block; }
+  #band {
+    position: absolute; left: 0; right: 0; top: 20%; height: 60%;
+    border-top: 2px solid rgba(56,189,248,.7); border-bottom: 2px solid rgba(56,189,248,.7);
+    pointer-events: none;
+  }
+  #start {
+    position: absolute; inset: 0; margin: 0; border-radius: 0;
+    background: rgba(15,23,42,.85); font-size: 1.2rem; font-weight: 600;
+  }
+  #result-container {
+    margin: 16px auto 0; max-width: 520px; padding: 14px;
+    background: #1e293b; border-radius: 8px; border: 1px solid #475569;
+    transition: border-color .15s;
+  }
+  #result-container.ok { border-color: #22c55e; }
+  .status { font-size: .85rem; color: #94a3b8; margin-bottom: 4px; }
+  #result { font-size: 1.5rem; font-weight: 700; color: #38bdf8; word-break: break-all; }
+  #format { font-size: .8rem; color: #94a3b8; min-height: 1.1em; }
+  #stats { margin-top: 6px; font-size: .8rem; color: #64748b; }
+  button {
+    margin-top: 12px; padding: 10px 18px; font-size: 1rem; border: 0; border-radius: 8px;
+    background: #334155; color: #f8fafc;
+  }
+</style>
 </head>
 <body>
+  <h2>Magazijn Barcode Scanner</h2>
 
-    <h1>Scanner Actief</h1>
-    <div id="reader"></div>
-    <div id="result">Laden van camera...</div>
+  <div id="viewport">
+    <video id="video" playsinline muted autoplay></video>
+    <div id="band"></div>
+    <button id="start">Tik om scanner te starten</button>
+  </div>
 
-    <script>
-        // Initialiseer de scanner zonder UI (Html5Qrcode ipv Html5QrcodeScanner)
-        const html5QrCode = new Html5Qrcode("reader");
-        
-        const config = { 
-            fps: 10, 
-            qrbox: { width: 300, height: 150 }, // Geoptimaliseerd voor barcodes
-            aspectRatio: 1.0 
-        };
+  <div id="result-container">
+    <div class="status" id="status">Scanner laden...</div>
+    <div id="result">Wachten op scan</div>
+    <div id="format"></div>
+    <div id="stats"></div>
+  </div>
 
-        const onScanSuccess = (decodedText, decodedResult) => {
-            document.getElementById('result').innerText = "Gescand: " + decodedText;
-            document.getElementById('result').style.backgroundColor = "#c8e6c9"; // Groen bij succes
-            console.log("Code:", decodedText);
-        };
+  <button id="torch" hidden>Zaklamp</button>
 
-        // Start direct de achtercamera
-        html5QrCode.start(
-            { facingMode: "environment" }, 
-            config, 
-            onScanSuccess
-        ).then(() => {
-            document.getElementById('result').innerText = "Scan een barcode...";
-        }).catch((err) => {
-            document.getElementById('result').innerText = "Fout bij starten: " + err;
-            console.error("Camera start error:", err);
-        });
-    </script>
+<script type="module">
+  const $ = (id) => document.getElementById(id);
+  const video = $("video");
+
+  // ================= Instellingen =================
+  const FORMATS = ["ean_13", "ean_8", "code_128"];
+  const DEBOUNCE_MS = 700;             // zelfde code binnen deze tijd negeren
+  // Aantal opeenvolgende identieke frames voordat een code geaccepteerd wordt.
+  // EAN heeft een checksum (1 is veilig); Code128 is korter, dus 2 voor extra zekerheid.
+  const CONFIRM_READS = { code_128: 2 };
+  const CONFIRM_WINDOW_MS = 500;       // bevestigingen moeten binnen dit venster vallen
+  // ================================================
+
+  // ---------- Detector kiezen + opwarmen (start al bij laden van de pagina) ----------
+  async function createDetector() {
+    let detector, type;
+    if ("BarcodeDetector" in window) {
+      try {
+        const supported = await BarcodeDetector.getSupportedFormats();
+        if (FORMATS.every((f) => supported.includes(f))) {
+          detector = new BarcodeDetector({ formats: FORMATS });
+          type = "native";
+        }
+      } catch (e) { /* val terug op ponyfill */ }
+    }
+    if (!detector) {
+      // Pin voor productie op een exacte versie, of host de bestanden zelf.
+      const mod = await import("https://cdn.jsdelivr.net/npm/barcode-detector@3/dist/es/ponyfill.min.js");
+      detector = new mod.BarcodeDetector({ formats: FORMATS });
+      type = "zxing-wasm";
+    }
+    // Warmup: forceert het laden/initialiseren van de WASM voordat de camera start
+    try {
+      const c = document.createElement("canvas");
+      c.width = c.height = 64;
+      c.getContext("2d").fillRect(0, 0, 64, 64);
+      await detector.detect(c);
+    } catch (e) {}
+    return { detector, type };
+  }
+  const detectorPromise = createDetector();
+  detectorPromise.then(({ type }) => {
+    $("status").textContent = `Scanner klaar (${type}) - tik op start`;
+  }).catch((e) => {
+    $("status").textContent = "Scanner laden mislukt (netwerk?)";
+    $("result").textContent = String(e);
+  });
+
+  // ---------- Audio / trillen ----------
+  let audioCtx;
+  function unlockAudio() {
+    try {
+      audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+      if (audioCtx.state === "suspended") audioCtx.resume();
+    } catch (e) {}
+  }
+  function beep() {
+    try {
+      if (!audioCtx) return;
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.frequency.value = 880;
+      gain.gain.value = 0.2;
+      osc.connect(gain).connect(audioCtx.destination);
+      osc.start();
+      osc.stop(audioCtx.currentTime + 0.1);
+    } catch (e) {}
+    if (navigator.vibrate) navigator.vibrate(60);
+  }
+
+  // ---------- Camera ----------
+  let stream = null;
+  async function startCamera() {
+    stream = await navigator.mediaDevices.getUserMedia({
+      audio: false,
+      video: {
+        facingMode: { ideal: "environment" },
+        width: { ideal: 1280 },
+        height: { ideal: 720 },
+        frameRate: { ideal: 30 }
+      }
+    });
+    video.srcObject = stream;
+    await video.play();
+
+    const track = stream.getVideoTracks()[0];
+    const caps = track.getCapabilities ? track.getCapabilities() : {};
+
+    if (caps.focusMode && caps.focusMode.includes("continuous")) {
+      try { await track.applyConstraints({ advanced: [{ focusMode: "continuous" }] }); } catch (e) {}
+    }
+
+    const btn = $("torch");
+    if (caps.torch) {
+      let on = false;
+      btn.hidden = false;
+      btn.onclick = async () => {
+        on = !on;
+        try { await track.applyConstraints({ advanced: [{ torch: on }] }); } catch (e) {}
+      };
+    } else {
+      btn.hidden = true;
+    }
+  }
+  function stopCamera() {
+    if (stream) stream.getTracks().forEach((t) => t.stop());
+    stream = null;
+    video.srcObject = null;
+  }
+
+  // ---------- Scan loop ----------
+  let loopToken = 0;
+  let candidate = "", candidateCount = 0, candidateTime = 0;
+  let lastCode = "", lastTime = 0;
+  const times = [];
+  let frameNo = 0;
+
+  const canvas = document.createElement("canvas");
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+
+  function accept(text, format) {
+    const now = Date.now();
+    if (text === lastCode && now - lastTime < DEBOUNCE_MS) {
+      lastTime = now; // code blijft in beeld: debounce verlengen
+      return;
+    }
+    lastCode = text; lastTime = now;
+    beep();
+    $("status").textContent = "Succesvol gescand!";
+    $("result").textContent = text;
+    $("format").textContent = format;
+    $("result-container").classList.add("ok");
+    console.log("Gescande barcode:", text, format);
+  }
+
+  function startLoop(detector, type) {
+    const token = ++loopToken;
+
+    async function tick() {
+      if (token !== loopToken) return; // lus is vervangen of gestopt
+      if (video.readyState >= 2 && video.videoWidth) {
+        try {
+          let source = video; // native: direct de video, geen kopie nodig
+          if (type !== "native") {
+            // WASM-fallback: alleen de middelste 60% van de hoogte verwerken
+            const vw = video.videoWidth, vh = video.videoHeight;
+            const sy = Math.round(vh * 0.2), sh = Math.round(vh * 0.6);
+            if (canvas.width !== vw || canvas.height !== sh) { canvas.width = vw; canvas.height = sh; }
+            ctx.drawImage(video, 0, sy, vw, sh, 0, 0, vw, sh);
+            source = canvas;
+          }
+
+          const t0 = performance.now();
+          const codes = await detector.detect(source);
+          const dt = performance.now() - t0;
+
+          times.push(dt);
+          if (times.length > 20) times.shift();
+          if (++frameNo % 10 === 0) {
+            const avg = times.reduce((a, b) => a + b, 0) / times.length;
+            $("stats").textContent = `Decode: ${dt.toFixed(1)} ms (gem. ${avg.toFixed(1)} ms)`;
+          }
+
+          if (codes.length) {
+            const { rawValue, format } = codes[0];
+            const now = Date.now();
+            if (rawValue === candidate && now - candidateTime <= CONFIRM_WINDOW_MS) {
+              candidateCount++;
+            } else {
+              candidate = rawValue; candidateCount = 1;
+            }
+            candidateTime = now;
+            if (candidateCount >= (CONFIRM_READS[format] || 1)) accept(rawValue, format);
+          }
+        } catch (e) {
+          console.warn("Detect error:", e);
+        }
+      }
+      if (token !== loopToken) return;
+      if (video.requestVideoFrameCallback) video.requestVideoFrameCallback(tick);
+      else requestAnimationFrame(tick);
+    }
+    tick();
+  }
+
+  // ---------- Start / pauzeren ----------
+  let started = false;
+  async function begin() {
+    const { detector, type } = await detectorPromise;
+    await startCamera();
+    $("status").textContent = `Scanner actief (${type}) - richt op barcode`;
+    startLoop(detector, type);
+  }
+
+  $("start").addEventListener("click", async () => {
+    unlockAudio();
+    $("start").hidden = true;
+    started = true;
+    try { await begin(); }
+    catch (err) {
+      started = false;
+      $("start").hidden = false;
+      $("status").textContent = "Fout bij starten (camera-toestemming of HTTPS nodig)";
+      $("result").textContent = String(err);
+      console.error(err);
+    }
+  });
+
+  // Camera uit als de pagina verborgen is (batterij, geen zwart beeld na terugkeer)
+  document.addEventListener("visibilitychange", async () => {
+    if (!started) return;
+    if (document.hidden) {
+      loopToken++;
+      stopCamera();
+    } else {
+      try { await begin(); } catch (e) { console.error(e); }
+    }
+  });
+</script>
 </body>
 </html>
